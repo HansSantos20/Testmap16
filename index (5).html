@@ -1,0 +1,240 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>1984 USA Presidential Election Map</title>
+    <!-- Mapbox GL JS CSS -->
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+        .mapboxgl-popup-content { font-family: Arial, sans-serif; font-size: 12px; }
+        .legend { 
+            position: absolute; 
+            bottom: 30px; 
+            right: 10px; 
+            background: white; 
+            padding: 10px; 
+            border-radius: 5px; 
+            box-shadow: 0 0 10px rgba(0,0,0,0.3);
+        }
+        .legend div { display: flex; align-items: center; margin-bottom: 5px; }
+        .legend-color { width: 20px; height: 20px; margin-right: 10px; display: inline-block; }
+    </style>
+</head>
+<body>
+    <!-- Map container -->
+    <div id="map"></div>
+    <!-- Legend -->
+    <div class="legend">
+        <div><span class="legend-color" style="background-color: #B82D35;"></span>Republican (Jay Rockefeller)</div>
+        <div><span class="legend-color" style="background-color: #2A71AE;"></span>Democrat</div>
+    </div>
+    <!-- Loading message -->
+    <div id="loading" class="absolute top-0 left-0 w-full h-full bg-gray-800 bg-opacity-75 flex items-center justify-center text-white text-xl">
+        Loading election data...
+    </div>
+
+    <!-- Mapbox GL JS -->
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+    <!-- PapaParse for CSV parsing -->
+    <script src="https://unpkg.com/papaparse@latest/papaparse.min.js"></script>
+    <script>
+        // Mapbox access token
+        mapboxgl.accessToken = 'YOUR_MAPBOX_ACCESS_TOKEN';
+
+        // Initialize map
+        const map = new mapboxgl.Map({
+            container: 'map',
+            style: 'mapbox://styles/mapbox/light-v10',
+            center: [-98, 39], // Center of the US
+            zoom: 3.5,
+            projection: 'albers'
+        });
+
+        // Google Sheets API URL (replace with your published Google Sheet CSV URL)
+        const sheetUrl = 'YOUR_GOOGLE_SHEET_CSV_URL';
+
+        // Function to clean and process data
+        function processAndCleanData(data) {
+            return data.map(row => {
+                // Clean numerical fields
+                const gopVotes = parseFloat(row['GOP VOTES']) || 0;
+                const dncVotes = parseFloat(row['DNC VOTES']) || 0;
+                const totalVotes = parseFloat(row['TOTAL VOTES']) || 0;
+                const republicanShare = parseFloat(row['REPUBLICAN VOTE SHARE'].replace('%', '')) || 0;
+                const democratShare = parseFloat(row['DEMOCRAT VOTE SHARE'].replace('%', '')) || 0;
+                const electors = parseInt(row['ELECTORAL VOTES']) || 0;
+                const winner = row['WINNER']?.trim() || 'Unknown';
+                const state = row['STATES']?.trim().toUpperCase() || '';
+                const abbreviation = row['ABBREVIATIONS']?.trim().toUpperCase() || '';
+
+                return {
+                    state,
+                    abbreviation,
+                    gopVotes,
+                    dncVotes,
+                    totalVotes,
+                    republicanShare,
+                    democratShare,
+                    electors,
+                    winner
+                };
+            }).filter(row => row.state && row.abbreviation && row.totalVotes > 0);
+        }
+
+        // Function to fetch and update map data
+        async function updateMap() {
+            try {
+                // Fetch CSV from Google Sheets
+                const response = await fetch(sheetUrl);
+                const csvText = await response.text();
+
+                // Parse CSV
+                Papa.parse(csvText, {
+                    header: true,
+                    skipEmptyLines: true,
+                    transformHeader: header => header.trim().replace(/^"|"$/g, ''),
+                    transform: (value, header) => value.trim().replace(/^"|"$/g, ''),
+                    complete: function(results) {
+                        const cleanedData = processAndCleanData(results.data);
+
+                        // Load GeoJSON for US states
+                        fetch('https://raw.githubusercontent.com/PublicaMundi/Mapping/master/data/geojson/us-states.json')
+                            .then(res => res.json())
+                            .then(geojson => {
+                                // Add election data to GeoJSON properties
+                                geojson.features.forEach(feature => {
+                                    const stateAbbr = feature.properties.postal;
+                                    const electionData = cleanedData.find(row => row.abbreviation === stateAbbr);
+                                    if (electionData) {
+                                        feature.properties.election = electionData;
+                                    }
+                                });
+
+                                // Add source and layer to map
+                                if (map.getSource('states')) {
+                                    map.getSource('states').setData(geojson);
+                                } else {
+                                    map.addSource('states', {
+                                        type: 'geojson',
+                                        data: geojson
+                                    });
+
+                                    map.addLayer({
+                                        id: 'state-fills',
+                                        type: 'fill',
+                                        source: 'states',
+                                        paint: {
+                                            'fill-color': [
+                                                'match',
+                                                ['get', ['election', 'winner'], ['properties']],
+                                                'Jay Rockefeller', '#B82D35', // Republican
+                                                'Democrat', '#2A71AE', // Democrat
+                                                '#808080' // Default (no data)
+                                            ],
+                                            'fill-opacity': 0.8
+                                        }
+                                    });
+
+                                    map.addLayer({
+                                        id: 'state-borders',
+                                        type: 'line',
+                                        source: 'states',
+                                        paint: {
+                                            'line-color': '#000000',
+                                            'line-width': 1
+                                        }
+                                    });
+                                }
+
+                                // Add popup on click
+                                map.on('click', 'state-fills', (e) => {
+                                    const props = e.features[0].properties.election;
+                                    if (props) {
+                                        const popupContent = `
+                                            <h3>${props.state}</h3>
+                                            <p><strong>Winner:</strong> ${props.winner}</p>
+                                            <p><strong>Electoral Votes:</strong> ${props.electors}</p>
+                                            <p><strong>Republican (Jay Rockefeller):</strong> ${props.gopVotes.toLocaleString()} (${props.republicanShare}%)</p>
+                                            <p><strong>Democrat:</strong> ${props.dncVotes.toLocaleString()} (${props.democratShare}%)</p>
+                                            <p><strong>Total Votes:</strong> ${props.totalVotes.toLocaleString()}</p>
+                                        `;
+                                        new mapboxgl.Popup()
+                                            .setLngLat(e.lngLat)
+                                            .setHTML(popupContent)
+                                            .addTo(map);
+                                    }
+                                });
+
+                                // Change cursor on hover
+                                map.on('mouseenter', 'state-fills', () => {
+                                    map.getCanvas().style.cursor = 'pointer';
+                                });
+                                map.on('mouseleave', 'state-fills', () => {
+                                    map.getCanvas().style.cursor = '';
+                                });
+
+                                // Hide loading message
+                                document.getElementById('loading').style.display = 'none';
+                            })
+                            .catch(err => console.error('Error loading GeoJSON:', err));
+                    },
+                    error: err => console.error('Error parsing CSV:', err)
+                });
+            } catch (err) {
+                console.error('Error fetching data:', err);
+            }
+        }
+
+        // Wait for map to load, then fetch data
+        map.on('load', () => {
+            updateMap();
+            // Poll for updates every 60 seconds
+            setInterval(updateMap, 60000);
+        });
+    </script>
+</body>
+</html>
